@@ -1,5 +1,6 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
+#include <EEPROM.h>
 
 #include "config.h"
 #include "secret.h"
@@ -11,6 +12,32 @@ const int scl_pin = 3;
 #include <Adafruit_ADS1015.h>
 Adafruit_ADS1115 ads;
 
+// Values we store in EEPROM
+TrapStats romStats;
+
+// For debugging purposes, to see if we read EEPROM correctly; I = version mismatch, init to 0s; 
+char eepromRead = 'N';
+
+void readStats() {
+  // Check to make sure stats values are real, by looking at first byte
+  EEPROM.get(EEPROM_ADDRESS, romStats);
+  if (romStats.checkVersion != STATS_VERSION) {
+    eepromRead = 'I';
+    romStats.checkVersion = STATS_VERSION;
+    romStats.shockCounter = 0;
+    romStats.caughtCounter = 0;
+    romStats.lastState = TRAP_IDLE;
+    saveStats();
+  } else {
+    eepromRead = 'Y';
+  }
+}
+
+void saveStats()
+{
+  EEPROM.put(EEPROM_ADDRESS, romStats);
+  EEPROM.commit();
+}
 
 void setup() {
   ////Serial.begin(115200);
@@ -28,6 +55,9 @@ void setup() {
   ads.begin();
   ads.setGain(GAIN_ONE);
 
+  EEPROM.begin(sizeof(TrapStats));
+  readStats();
+
   connectWifi();
 }
 
@@ -42,19 +72,25 @@ void loop() {
     http.addHeader("Content-Type", "application/json");
     int v[2];
     getVoltage(v);
-    char buf[200];
+    char buf[300];
     struct sens sensReading;
     sensReading = caughtSensorReading();
-    sprintf(buf, "{\"deviceId\": \"%s\", \"batteryV\": %d.%d, \"caught\": %s, \"onPercent\": %d, \"ADC\": %lu, \"millisOn\": %lu, \"millisOff\": %lu, \"measureMs\": %lu}", 
+
+    // Interpret measurements, and update permanent memory if needed
+    interpretTrapState(sensReading);
+
+    sprintf(buf, "{\"deviceId\": \"%s\", \"batteryV\": %d.%d, \"caught\": %s, \"onPercent\": %d, \"ADC\": %lu, \"millisOn\": %lu, \"millisOff\": %lu, \"measureMs\": %lu, \"counter\": {\"shock\": %lu, \"caught\": %lu}}", 
       DEVICE_ID, 
       v[0], 
       v[1], 
-      (sensReading.onPercent >= CAUGHT_DUTY_CYCLE_THRESHOLD ? "true" : "false"),
+      (romStats.lastState == TRAP_CAUGHT ? "true" : "false"), // at this point, "last" is already current
       sensReading.onPercent,
       ads.readADC_SingleEnded(SENSOR_PIN),
       sensReading.millisOn,
       sensReading.millisOff,
-      sensReading.measureDuration
+      sensReading.measureDuration,
+      romStats.shockCounter,
+      romStats.caughtCounter
     );
     int httpCode = http.POST(buf);
     http.end();
@@ -95,6 +131,39 @@ void getVoltage(int *buf) {
   buf[0] = (int)floor(volts);
   int mV = (volts - buf[0]) * 1000;
   buf[1] = mV;
+}
+
+void interpretTrapState(struct sens sensReading) {
+    bool stateChanged = false;
+    if (sensReading.onPercent >= CAUGHT_DUTY_CYCLE_THRESHOLD) {
+      currentState = TRAP_CAUGHT;
+      if (romStats.lastState != currentState) {
+        romStats.caughtCounter++;
+        stateChanged = true;
+      }
+    } else if (sensReading.millisOn == 0 and sensReading.millisOff == 1) {
+      // Special state when it's 100% on, but so that we don't trigger "caught" interpretation
+      // That means it's actively shocking now (or the trap is off by the switch)
+      currentState = TRAP_SHOCKING;
+      if (romStats.lastState != currentState) {
+        romStats.shockCounter++;
+        stateChanged = true;
+      }
+    } else {
+      currentState = TRAP_IDLE;
+      // If the trap was cleaned after catching something - reset the shock counter
+      if (romStats.lastState == TRAP_CAUGHT) {
+        romStats.shockCounter=0;
+      }
+    }
+    if (romStats.lastState != currentState) {
+      stateChanged = true;
+      romStats.lastState = currentState;
+    }
+    // Track state changes, so we don't have to write to EEPROM every time; there is limited number of writes on some boards
+    if (stateChanged) {
+      saveStats();
+    }
 }
 
 struct sens caughtSensorReading() {

@@ -1,4 +1,5 @@
-#define DEVICE_ID "Omega"
+#define DEVICE_ID "Kappa"
+// Comment out to disable
 #define DEEP_SLEEP_ENABLED
 
 // How long to sleep between signals to the server
@@ -23,12 +24,16 @@ struct sens {
 };
 
 enum TrapState {
-  TRAP_IDLE,
-  TRAP_SHOCKING,
-  TRAP_CAUGHT
+  TRAP_IDLE = 0,
+  TRAP_SHOCKING = 1,
+  TRAP_CAUGHT = 2
 };
 
-struct stats {
+#define EEPROM_ADDRESS 0
+#define STATS_VERSION 'A'
+
+struct TrapStats {
+  char checkVersion; // This is to be able to init to 0 when we're first time powering up; 1 byte symbol + 1 byte separator
   unsigned long shockCounter;
   unsigned long caughtCounter;
   TrapState lastState;
